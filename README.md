@@ -48,6 +48,50 @@
 - Provides plugin components under `io.kestra.plugin.telegram`.
 - Includes classes such as `TelegramTemplate`, `TelegramBotApiService`, `TelegramExecution`, `TelegramSend`.
 
+## Send a file from an earlier task
+
+Set `from` on `TelegramSend` to a file URI, such as an earlier task's `uri` or
+`outputFiles` value. The task uploads the file using Telegram's `sendDocument`
+API and preserves the filename from the URI. It reads the file through Kestra;
+Telegram does not need access to the URI itself.
+
+`from` accepts internal storage (`kestra://`), namespace files (`nsfile://`) and
+local files (`file://`, subject to the `kestra.local-files.allowed-paths`
+configuration).
+
+```yaml
+id: send_report_to_telegram
+namespace: company.team
+
+tasks:
+  - id: report
+    type: io.kestra.plugin.core.storage.Write
+    extension: .csv
+    content: |
+      name,total
+      example,42
+
+  - id: send_file
+    type: io.kestra.plugin.telegram.TelegramSend
+    token: "{{ secret('TELEGRAM_TOKEN') }}"
+    channel: "{{ secret('TELEGRAM_CHAT_ID') }}"
+    from: "{{ outputs.report.uri }}"
+    caption: "<b>Report</b> for {{ flow.id }}"
+    parseMode: HTML
+```
+
+`caption` is optional and supports expressions. Use `parseMode: HTML` or
+`parseMode: MARKDOWNV2` to format it; omit `parseMode` for plain text. Telegram
+limits captions to 1024 characters after entities parsing and document uploads
+to 50 MB on its hosted [Bot API](https://core.telegram.org/bots/api#senddocument).
+
+For text messages, omit `from` and set `payload` to the message text. When `from`
+is present, `payload` is unused; use `caption` for text accompanying the file.
+`caption` applies only to file uploads and is ignored for text messages.
+The legacy `io.kestra.plugin.notifications.telegram.TelegramSend` alias also
+supports these properties. HTTP `options` and `endpointOverride` apply to both
+text messages and document uploads.
+
 ## Documentation
 * Full documentation can be found under: [kestra.io/docs](https://kestra.io/docs)
 * Documentation for developing a plugin is included in the [Plugin Developer Guide](https://kestra.io/docs/plugin-developer-guide/)

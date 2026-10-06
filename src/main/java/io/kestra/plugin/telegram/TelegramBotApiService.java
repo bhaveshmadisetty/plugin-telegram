@@ -1,7 +1,14 @@
 package io.kestra.plugin.telegram;
 
+import java.io.InputStream;
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.util.Objects;
+
+import org.apache.hc.client5.http.entity.mime.HttpMultipartMode;
+import org.apache.hc.client5.http.entity.mime.MultipartEntityBuilder;
+import org.apache.hc.core5.http.ContentType;
+import org.apache.hc.core5.http.HttpEntity;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
@@ -41,7 +48,45 @@ public class TelegramBotApiService {
                     .build()
             );
 
-        HttpRequest request = requestBuilder.build();
+        sendRequest(client, requestBuilder.build());
+    }
+
+    public static void sendDocument(HttpClient client, String destinationId, String apiToken, InputStream document, String filename, String caption, String url,
+        HttpRequest.HttpRequestBuilder requestBuilder, String parseMode) throws ErrorSendingMessageException {
+
+        ContentType textContentType = ContentType.TEXT_PLAIN.withCharset(StandardCharsets.UTF_8);
+        // Use UTF-8 multipart headers to preserve non-ASCII filenames.
+        MultipartEntityBuilder multipart = MultipartEntityBuilder.create()
+            .setMode(HttpMultipartMode.LEGACY)
+            .setCharset(StandardCharsets.UTF_8)
+            .setContentType(ContentType.MULTIPART_FORM_DATA.withCharset(StandardCharsets.UTF_8))
+            .addTextBody("chat_id", destinationId, textContentType)
+            .addBinaryBody("document", document, ContentType.APPLICATION_OCTET_STREAM, filename);
+        if (caption != null) {
+            multipart.addTextBody("caption", caption, textContentType);
+        }
+        if (parseMode != null) {
+            multipart.addTextBody("parse_mode", parseMode, textContentType);
+        }
+        HttpEntity entity = multipart.build();
+
+        // Use a streamed multipart entity to preserve the filename without buffering the file.
+        // The entity supplies the Content-Type header, including its generated boundary.
+        requestBuilder
+            .uri(URI.create(url + "/bot" + apiToken + "/sendDocument"))
+            .method("POST")
+            .body(
+                HttpRequest.PassthroughRequestBody.builder()
+                    .entity(entity)
+                    .contentType(entity.getContentType())
+                    .charset(StandardCharsets.UTF_8)
+                    .build()
+            );
+
+        sendRequest(client, requestBuilder.build());
+    }
+
+    private static void sendRequest(HttpClient client, HttpRequest request) throws ErrorSendingMessageException {
 
         try {
             HttpResponse<TelegramBotApiResponse> exchange = client.request(request, TelegramBotApiResponse.class);

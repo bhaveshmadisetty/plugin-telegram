@@ -1,6 +1,11 @@
 package io.kestra.plugin.telegram;
 
+import java.io.ByteArrayInputStream;
+import java.io.IOException;
+import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.util.Map;
+import java.util.UUID;
 
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -8,18 +13,25 @@ import org.junit.jupiter.api.Test;
 
 import io.kestra.core.junit.annotations.KestraTest;
 import io.kestra.core.models.property.Property;
+import io.kestra.core.models.property.URIFetcher;
+import io.kestra.core.models.tasks.Task;
 import io.kestra.core.runners.RunContext;
 import io.kestra.core.runners.RunContextFactory;
 import io.kestra.core.serializers.JacksonMapper;
 
 import io.micronaut.context.ApplicationContext;
+import io.micronaut.http.HttpStatus;
 import io.micronaut.runtime.server.EmbeddedServer;
 import jakarta.inject.Inject;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalToObject;
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * This test will only test the main task, this allow you to send any input
@@ -39,6 +51,215 @@ class TelegramSendTest {
     void resetMock() {
         FakeTelegramController.message = null;
         FakeTelegramController.token = null;
+        FakeTelegramController.documentChannel = null;
+        FakeTelegramController.documentCaption = null;
+        FakeTelegramController.documentParseMode = null;
+        FakeTelegramController.documentFilename = null;
+        FakeTelegramController.documentBytes = null;
+        FakeTelegramController.customHeader = null;
+        FakeTelegramController.responseOk = true;
+        FakeTelegramController.responseStatus = HttpStatus.OK;
+    }
+
+    @Test
+    void run_withFile_shouldUploadDocumentWithoutPayload() throws Exception {
+        RunContext runContext = runContextFactory.of();
+        byte[] content = { 0, 1, 2, 13, 10, (byte) 0x80, (byte) 0xff };
+        URI file = storeFile(runContext, "report.bin", content);
+
+        documentTask().from(Property.ofValue(file.toString())).build().run(runContext);
+
+        assertThat(FakeTelegramController.token, equalToObject("token"));
+        assertThat(FakeTelegramController.documentChannel, equalToObject("channel"));
+        assertThat(FakeTelegramController.documentFilename, equalToObject("report.bin"));
+        assertArrayEquals(content, FakeTelegramController.documentBytes);
+        assertNull(FakeTelegramController.documentCaption);
+        assertNull(FakeTelegramController.documentParseMode);
+        assertNull(FakeTelegramController.message);
+    }
+
+    @Test
+    void run_withUnicodeFilename_shouldPreserveFilename() throws Exception {
+        RunContext runContext = runContextFactory.of();
+        byte[] content = "report".getBytes(StandardCharsets.UTF_8);
+        URI file = storeFile(runContext, "résumé-报告.txt", content);
+
+        documentTask().from(Property.ofValue(file.toString())).build().run(runContext);
+
+        assertThat(FakeTelegramController.documentFilename, equalToObject("résumé-报告.txt"));
+        assertArrayEquals(content, FakeTelegramController.documentBytes);
+    }
+
+    @Test
+    void run_withFileFromPreviousOutputAndCaption_fromYaml_shouldRenderProperties() throws Exception {
+        byte[] content = "name,total\nexample,42\n".getBytes(StandardCharsets.UTF_8);
+        URI file = storeFile(runContextFactory.of(), "report with spaces.csv", content);
+        RunContext runContext = runContextFactory.of(
+            Map.of(
+                "outputs", Map.of("report", Map.of("uri", file.toString())),
+                "destination", "-12345",
+                "caption", "<b>Résumé</b> 📄",
+                "mode", "HTML"
+            )
+        );
+        EmbeddedServer server = applicationContext.getBean(EmbeddedServer.class);
+        server.start();
+        String yaml = """
+            endpointOverride: "%s"
+            token: token
+            channel: "{{ destination }}"
+            from: "{{ outputs.report.uri }}"
+            caption: "{{ caption }}"
+            parseMode: "{{ mode }}"
+            options:
+              headers:
+                X-Telegram-Test: "{{ destination }}"
+            """.formatted(server.getURL());
+
+        JacksonMapper.ofYaml().readValue(yaml, TelegramSend.class).run(runContext);
+
+        assertThat(FakeTelegramController.documentChannel, equalToObject("-12345"));
+        assertThat(FakeTelegramController.documentFilename, equalToObject("report with spaces.csv"));
+        assertThat(FakeTelegramController.documentCaption, equalToObject("<b>Résumé</b> 📄"));
+        assertThat(FakeTelegramController.documentParseMode, equalToObject("HTML"));
+        assertThat(FakeTelegramController.customHeader, equalToObject("-12345"));
+        assertArrayEquals(content, FakeTelegramController.documentBytes);
+        assertNull(FakeTelegramController.message);
+    }
+
+    @Test
+    void run_withFileAndMarkdownCaption_shouldUseCaptionInsteadOfPayload() throws Exception {
+        RunContext runContext = runContextFactory.of();
+        URI file = storeFile(runContext, "empty.txt", new byte[0]);
+
+        documentTask()
+            .from(Property.ofValue(file.toString()))
+            .payload(Property.ofExpression("{{ unused_payload }}"))
+            .caption(Property.ofValue("*Report*"))
+            .parseMode(Property.ofValue(TelegramSend.ParseMode.MARKDOWNV2))
+            .build().run(runContext);
+
+        assertThat(FakeTelegramController.documentCaption, equalToObject("*Report*"));
+        assertThat(FakeTelegramController.documentParseMode, equalToObject("MarkdownV2"));
+        assertArrayEquals(new byte[0], FakeTelegramController.documentBytes);
+        assertNull(FakeTelegramController.message);
+    }
+
+    @Test
+    void run_withLegacyAlias_shouldUploadDocument() throws Exception {
+        RunContext runContext = runContextFactory.of();
+        byte[] content = "legacy alias".getBytes(StandardCharsets.UTF_8);
+        URI file = storeFile(runContext, "legacy.txt", content);
+        EmbeddedServer server = applicationContext.getBean(EmbeddedServer.class);
+        server.start();
+        String yaml = """
+            id: send_file
+            type: io.kestra.plugin.notifications.telegram.TelegramSend
+            endpointOverride: "%s"
+            token: token
+            channel: channel
+            from: "%s"
+            """.formatted(server.getURL(), file);
+
+        ((TelegramSend) JacksonMapper.ofYaml().readValue(yaml, Task.class)).run(runContext);
+
+        assertThat(FakeTelegramController.documentFilename, equalToObject("legacy.txt"));
+        assertArrayEquals(content, FakeTelegramController.documentBytes);
+    }
+
+    @Test
+    void from_shouldAcceptEverySchemeSupportedByKestra() {
+        // 'from' delegates resolution to URIFetcher, so it accepts internal storage,
+        // namespace files and local files rather than only the kestra scheme.
+        assertTrue(URIFetcher.supports(URI.create("kestra:///main/f/e/tasks/report.csv")));
+        assertTrue(URIFetcher.supports(URI.create("nsfile:///telegram/report.csv")));
+        assertTrue(URIFetcher.supports(URI.create("file:///tmp/report.csv")));
+        assertFalse(URIFetcher.supports(URI.create("https://example.com/report.csv")));
+    }
+
+    @Test
+    void run_withInvalidFile_shouldFailBeforeSending() {
+        RunContext runContext = runContextFactory.of();
+        for (String from : new String[] { null, "", " ", "not a uri", "https://example.com/report.txt", "s3://bucket/report.txt", "kestra:///", "kestra://host", "nsfile:///", "file:///" }) {
+            TelegramSend task = documentTask().from(Property.ofValue(from)).build();
+
+            IllegalArgumentException exception = assertThrows(IllegalArgumentException.class, () -> task.run(runContext), "from: " + from);
+
+            assertThat(exception.getMessage(), containsString("'from' must specify"));
+            assertNull(FakeTelegramController.token);
+        }
+    }
+
+    @Test
+    void run_withMissingFile_shouldFailBeforeSending() {
+        RunContext runContext = runContextFactory.of();
+        TelegramSend task = documentTask().from(Property.ofValue("kestra:///telegram-tests/" + UUID.randomUUID() + "/missing.txt")).build();
+
+        IOException exception = assertThrows(IOException.class, () -> task.run(runContext));
+
+        assertThat(exception.getMessage(), containsString("Unable to read the file specified by 'from'"));
+        assertNull(FakeTelegramController.token);
+    }
+
+    @Test
+    void run_withoutPayloadOrFile_shouldFailBeforeSending() {
+        IllegalArgumentException exception = assertThrows(IllegalArgumentException.class, () -> documentTask().build().run(runContextFactory.of()));
+
+        assertThat(exception.getMessage(), equalToObject("Either 'payload' or 'from' must be provided."));
+        assertNull(FakeTelegramController.token);
+    }
+
+    @Test
+    void run_withDocumentApiFailure_shouldThrowSendingException() throws Exception {
+        RunContext runContext = runContextFactory.of();
+        URI file = storeFile(runContext, "report.txt", "report".getBytes(StandardCharsets.UTF_8));
+        FakeTelegramController.responseOk = false;
+        TelegramSend task = documentTask().from(Property.ofValue(file.toString())).build();
+
+        TelegramBotApiService.ErrorSendingMessageException exception = assertThrows(
+            TelegramBotApiService.ErrorSendingMessageException.class, () -> task.run(runContext)
+        );
+
+        assertThat(exception.httpStatus.getCode(), equalToObject(200));
+        assertThat(FakeTelegramController.documentFilename, equalToObject("report.txt"));
+    }
+
+    @Test
+    void run_withDocumentHttpFailure_shouldThrowSendingException() throws Exception {
+        RunContext runContext = runContextFactory.of();
+        URI file = storeFile(runContext, "report.txt", "report".getBytes(StandardCharsets.UTF_8));
+        FakeTelegramController.responseStatus = HttpStatus.BAD_REQUEST;
+        TelegramSend task = documentTask().from(Property.ofValue(file.toString())).build();
+
+        TelegramBotApiService.ErrorSendingMessageException exception = assertThrows(
+            TelegramBotApiService.ErrorSendingMessageException.class, () -> task.run(runContext)
+        );
+
+        assertThat(exception.httpStatus.getCode(), equalToObject(400));
+    }
+
+    @Test
+    void run_withTextApiFailure_shouldThrowSendingException() {
+        FakeTelegramController.responseOk = false;
+        TelegramSend task = documentTask().payload(Property.ofValue("Hello")).build();
+
+        assertThrows(TelegramBotApiService.ErrorSendingMessageException.class, () -> task.run(runContextFactory.of()));
+    }
+
+    private TelegramSend.TelegramSendBuilder<?, ?> documentTask() {
+        EmbeddedServer server = applicationContext.getBean(EmbeddedServer.class);
+        server.start();
+        return TelegramSend.builder()
+            .endpointOverride(Property.ofValue(server.getURL().toString()))
+            .token(Property.ofValue("token"))
+            .channel(Property.ofValue("channel"));
+    }
+
+    private URI storeFile(RunContext runContext, String filename, byte[] content) throws IOException {
+        URI uri = URI.create("kestra:///telegram-tests/" + UUID.randomUUID() + "/" + filename.replace(" ", "%20"));
+        try (ByteArrayInputStream input = new ByteArrayInputStream(content)) {
+            return runContext.storage().putFile(input, uri);
+        }
     }
 
     @Test
