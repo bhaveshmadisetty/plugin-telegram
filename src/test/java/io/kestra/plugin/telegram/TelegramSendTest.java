@@ -59,6 +59,7 @@ class TelegramSendTest {
         FakeTelegramController.customHeader = null;
         FakeTelegramController.responseOk = true;
         FakeTelegramController.responseStatus = HttpStatus.OK;
+        FakeTelegramController.responseDescription = null;
     }
 
     @Test
@@ -236,6 +237,51 @@ class TelegramSendTest {
         );
 
         assertThat(exception.httpStatus.getCode(), equalToObject(400));
+        assertThat(exception.getMessage(), equalToObject("Unable to send Telegram message: HTTP 400 Bad Request"));
+    }
+
+    @Test
+    void run_withDocumentHttpFailure_shouldIncludeTelegramDescription() throws Exception {
+        RunContext runContext = runContextFactory.of();
+        URI file = storeFile(runContext, "report.txt", "report".getBytes(StandardCharsets.UTF_8));
+        FakeTelegramController.responseStatus = HttpStatus.BAD_REQUEST;
+        FakeTelegramController.responseOk = false;
+        FakeTelegramController.responseDescription = "Bad Request: message caption is too long";
+        TelegramSend task = documentTask().from(Property.ofValue(file.toString())).caption(Property.ofValue("caption")).build();
+
+        TelegramBotApiService.ErrorSendingMessageException exception = assertThrows(
+            TelegramBotApiService.ErrorSendingMessageException.class, () -> task.run(runContext)
+        );
+
+        assertThat(exception.getMessage(), equalToObject("Unable to send Telegram message: HTTP 400 - Bad Request: message caption is too long"));
+    }
+
+    @Test
+    void run_withDocumentTooLarge_shouldHintUploadLimit() throws Exception {
+        RunContext runContext = runContextFactory.of();
+        URI file = storeFile(runContext, "report.txt", "report".getBytes(StandardCharsets.UTF_8));
+        FakeTelegramController.responseStatus = HttpStatus.REQUEST_ENTITY_TOO_LARGE;
+        TelegramSend task = documentTask().from(Property.ofValue(file.toString())).build();
+
+        TelegramBotApiService.ErrorSendingMessageException exception = assertThrows(
+            TelegramBotApiService.ErrorSendingMessageException.class, () -> task.run(runContext)
+        );
+
+        assertThat(exception.httpStatus.getCode(), equalToObject(413));
+        assertThat(exception.getMessage(), containsString("50 MB upload limit"));
+    }
+
+    @Test
+    void run_withTextApiFailure_shouldIncludeTelegramDescription() {
+        FakeTelegramController.responseOk = false;
+        FakeTelegramController.responseDescription = "Bad Request: chat not found";
+        TelegramSend task = documentTask().payload(Property.ofValue("Hello")).build();
+
+        TelegramBotApiService.ErrorSendingMessageException exception = assertThrows(
+            TelegramBotApiService.ErrorSendingMessageException.class, () -> task.run(runContextFactory.of())
+        );
+
+        assertThat(exception.getMessage(), containsString("Bad Request: chat not found"));
     }
 
     @Test

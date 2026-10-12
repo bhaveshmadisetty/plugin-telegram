@@ -2,6 +2,7 @@ package io.kestra.plugin.telegram;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.util.HashMap;
 import java.util.Map;
 
 import io.micronaut.http.HttpRequest;
@@ -30,13 +31,14 @@ public class FakeTelegramController {
     public static String customHeader;
     public static boolean responseOk = true;
     public static HttpStatus responseStatus = HttpStatus.OK;
+    public static String responseDescription;
 
     @Post("/bot{token}/sendMessage")
     public HttpResponse<TelegramBotApiService.TelegramBotApiResponse> post(String token, @Body TelegramBotApiService.TelegramMessage message) {
         FakeTelegramController.token = token;
         FakeTelegramController.message = message;
         return HttpResponse.<TelegramBotApiService.TelegramBotApiResponse> status(responseStatus)
-            .body(new TelegramBotApiService.TelegramBotApiResponse(responseOk, message));
+            .body(new TelegramBotApiService.TelegramBotApiResponse(responseOk, message, responseDescription));
     }
 
     @ExecuteOn(TaskExecutors.IO)
@@ -53,7 +55,10 @@ public class FakeTelegramController {
         try (InputStream input = document.getInputStream()) {
             documentBytes = input.readAllBytes();
         }
-        return HttpResponse.<Map<String, Object>> status(responseStatus)
-            .body(Map.of("ok", responseOk, "result", Map.of("message_id", 1, "document", Map.of("file_name", documentFilename))));
+        Map<String, Object> body = new HashMap<>(Map.of("ok", responseOk, "result", Map.of("message_id", 1, "document", Map.of("file_name", documentFilename))));
+        if (responseDescription != null) {
+            body.put("description", responseDescription);
+        }
+        return HttpResponse.<Map<String, Object>> status(responseStatus).body(body);
     }
 }

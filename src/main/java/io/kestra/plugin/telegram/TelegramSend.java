@@ -159,7 +159,7 @@ public class TelegramSend extends AbstractTelegramConnection {
                     .orElse(null)
                 : null;
             if (this.from != null) {
-                String rFrom = runContext.render(this.from).as(String.class)
+                var rFrom = runContext.render(this.from).as(String.class)
                     .filter(value -> !value.isBlank())
                     .orElseThrow(() -> new IllegalArgumentException(INVALID_FROM_MESSAGE));
                 URI fileUri;

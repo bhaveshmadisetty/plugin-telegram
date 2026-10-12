@@ -8,10 +8,10 @@ import java.util.Objects;
 import org.apache.hc.client5.http.entity.mime.HttpMultipartMode;
 import org.apache.hc.client5.http.entity.mime.MultipartEntityBuilder;
 import org.apache.hc.core5.http.ContentType;
-import org.apache.hc.core5.http.HttpEntity;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.core.JsonProcessingException;
 
 import io.kestra.core.exceptions.IllegalVariableEvaluationException;
 import io.kestra.core.http.HttpRequest;
@@ -19,6 +19,7 @@ import io.kestra.core.http.HttpResponse;
 import io.kestra.core.http.client.HttpClient;
 import io.kestra.core.http.client.HttpClientException;
 import io.kestra.core.http.client.HttpClientResponseException;
+import io.kestra.core.serializers.JacksonMapper;
 
 import io.micronaut.http.HttpStatus;
 import lombok.EqualsAndHashCode;
@@ -54,9 +55,9 @@ public class TelegramBotApiService {
     public static void sendDocument(HttpClient client, String destinationId, String apiToken, InputStream document, String filename, String caption, String url,
         HttpRequest.HttpRequestBuilder requestBuilder, String parseMode) throws ErrorSendingMessageException {
 
-        ContentType textContentType = ContentType.TEXT_PLAIN.withCharset(StandardCharsets.UTF_8);
+        var textContentType = ContentType.TEXT_PLAIN.withCharset(StandardCharsets.UTF_8);
         // Use UTF-8 multipart headers to preserve non-ASCII filenames.
-        MultipartEntityBuilder multipart = MultipartEntityBuilder.create()
+        var multipart = MultipartEntityBuilder.create()
             .setMode(HttpMultipartMode.LEGACY)
             .setCharset(StandardCharsets.UTF_8)
             .setContentType(ContentType.MULTIPART_FORM_DATA.withCharset(StandardCharsets.UTF_8))
@@ -68,10 +69,9 @@ public class TelegramBotApiService {
         if (parseMode != null) {
             multipart.addTextBody("parse_mode", parseMode, textContentType);
         }
-        HttpEntity entity = multipart.build();
+        var entity = multipart.build();
 
-        // Use a streamed multipart entity to preserve the filename without buffering the file.
-        // The entity supplies the Content-Type header, including its generated boundary.
+        // multipart entity supplies its own Content-Type boundary
         requestBuilder
             .uri(URI.create(url + "/bot" + apiToken + "/sendDocument"))
             .method("POST")
@@ -96,16 +96,32 @@ public class TelegramBotApiService {
                     || exchange.getBody() == null
                     || !Objects.requireNonNull(exchange.getBody()).ok()
             ) {
-                throw new ErrorSendingMessageException(exchange.getStatus(), null);
+                var description = exchange.getBody() != null ? exchange.getBody().description() : null;
+                throw new ErrorSendingMessageException(exchange.getStatus(), description, null);
             }
         } catch (HttpClientResponseException e) {
-            throw new ErrorSendingMessageException(Objects.requireNonNull(e.getResponse()).getStatus(), e);
+            var response = Objects.requireNonNull(e.getResponse());
+            throw new ErrorSendingMessageException(response.getStatus(), errorDescription(response.getBody()), e);
         } catch (IllegalVariableEvaluationException | HttpClientException e) {
             throw new RuntimeException(e);
         }
     }
 
-    public record TelegramBotApiResponse(boolean ok, TelegramMessage result) {
+    // Telegram explains rejections in the "description" field of its JSON error body.
+    private static String errorDescription(Object body) {
+        var raw = body instanceof byte[] bytes ? new String(bytes, StandardCharsets.UTF_8) : body instanceof String text ? text : null;
+        if (raw == null || raw.isBlank()) {
+            return null;
+        }
+        try {
+            return JacksonMapper.ofJson().readTree(raw).path("description").textValue();
+        } catch (JsonProcessingException e) {
+            return null;
+        }
+    }
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record TelegramBotApiResponse(boolean ok, TelegramMessage result, String description) {
     }
 
     @Getter
@@ -135,8 +151,28 @@ public class TelegramBotApiService {
         public final HttpResponse.Status httpStatus;
 
         public ErrorSendingMessageException(HttpResponse.Status httpStatus, Throwable e) {
-            super(String.format("Unable to send Telegram message: %s ", httpStatus), e);
+            this(httpStatus, null, e);
+        }
+
+        public ErrorSendingMessageException(HttpResponse.Status httpStatus, String description, Throwable e) {
+            super(buildMessage(httpStatus, description), e);
             this.httpStatus = httpStatus;
+        }
+
+        private static String buildMessage(HttpResponse.Status httpStatus, String description) {
+            var message = new StringBuilder("Unable to send Telegram message");
+            if (httpStatus != null) {
+                message.append(": HTTP ").append(httpStatus.getCode());
+            }
+            if (description != null && !description.isBlank()) {
+                message.append(" - ").append(description);
+            } else if (httpStatus != null && httpStatus.getReason() != null) {
+                message.append(" ").append(httpStatus.getReason());
+            }
+            if (httpStatus != null && httpStatus.getCode() == HttpStatus.REQUEST_ENTITY_TOO_LARGE.getCode()) {
+                message.append(" (the file likely exceeds Telegram's 50 MB upload limit for bots)");
+            }
+            return message.toString();
         }
     }
 }
